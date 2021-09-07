@@ -1,0 +1,187 @@
+' Just use global vars, screw this VB shit
+Dim CurrentFeed, MaxXProbe, XProbeIncrements, MaxDiffTolerance, ProbeZIncrement, ProbeXIncrement As Double  
+Dim XZ, YZ, ZZ, XCollMax, ZCollMax, XCollCoord, ZCollCoord, FirstXMax, FirstZMax, BarL  As Double  
+Dim CurrentAbsInc, CurrentGmode, SafeJogFeedAlongY, FeedR, ContinousDecrements As Integer  
+
+
+Sub Main()
+    CurrentFeed = GetOemDRO(818) 'Get the current feedrate to return later
+    CurrentAbsInc = GetOemLED(48) 'Get the current G90/G91 state
+    CurrentGmode = GetOemDRO(819) 'Get the current G0/G1 state
+    BarL = 190 ' Distance to the second probe along Y
+    SafeJogFeedAlongY = 500 ' Jog speed along Y
+    MaxXProbe=0.6 ' The max amount probe can go left looking for a bar collision
+    XProbeIncrements=-0.05 ' controller not doing probe properly - has huge overrun and poor accuracy, we going to do programmatic incremental probe. This values is the increment
+    MaxDiffTolerance=0.5 'If probe moved this far away from max value - consider we already too off, we found highest spot and we can give up
+    ProbeZIncrement=0.05 ' Z shape of probbing scallop
+    ProbeXIncrement=Abs(XProbeIncrements * 3) ' X shape of probbing scallop
+    FeedR = 500 ' Probes and rapid move feedrate. There is no point to make it low as it won't increase accuracy, it just has to be safe enough so you can reset the machine in case of emergency
+    ContinousDecrements = 30 ' How many scallop probe moves that doesn't found any spot higher than we seen before we have to do before considering we hit tip of the bar
+    XZ = Round(GetDRO(0), 4) ' Initial X
+    YZ = Round(GetDRO(1), 4) ' Initial Y
+    ZZ = Round(GetDRO(2), 4) ' Initial Z
+
+    ProbeRoutine ' We need to do first probe so we can position for next probe with scallop settings
+    XCollMax = XCollCoord
+    ZCollMax = ZCollCoord
+
+    ProbeScallop
+    FirstXMax = XCollMax
+    FirstZMax = ZCollMax 
+    ResetRoutine
+    ' We're at zero position now
+    
+    ' MsgBox("Going to next probe")
+    Code "G91" ' Switch back to incremental mode
+    ' Begin move to second probe position
+    Code "G1 Y" & BarL & " F" & SafeJogFeedAlongY ' Use probe move with safe feedrate and pray that if we hit somethin probe will save us
+    While IsMoving()
+    Wend
+    ' End moving to second probe position
+    
+    ProbeRoutine ' We need to do first probe so we can position next for next probe with scallop settings
+    XCollMax = XCollCoord
+    ZCollMax = ZCollCoord
+    ProbeScallop
+    ' MsgBox("Going to zero") and second probe position
+    ResetRoutine
+    
+    
+    Code "G91" ' Switch back to incremental mode after reset routine
+    ' Begin move to first probe position
+    Code "G1 Y" & BarL * -1 & " F" & SafeJogFeedAlongY ' Use probe move with safe feedrate and pray that if we hit somethin probe will save us
+    While IsMoving()
+    Wend
+    ResetRoutine
+    ' End moving to second probe position
+    ' angle in XY plane
+    xy_angle = GetAngleByTwoPoints(FirstXMax, XCollMax)
+    ' G68 <alpha> <beta> R<angle>
+    xy_offset = "G68 X" & XZ & "Y" & YZ & " R" & xy_angle
+    ' angle in yz plane
+    yz_angle = GetAngleByTwoPoints(FirstZMax, ZCollMax)
+    yz_offset = "G68 Y" & YZ & "Z" & ZZ & " R" & yz_angle
+    Err = AppendTeachFile("Probes.txt")
+    If Err = 0 Then
+       MsgBox("Unable To Open file ")
+    Else
+       Code "(XY=" & xy_offset & " YZ=" & yz_offset & " XMax=" & XCollMax & " ZMax=" & ZCollMax & " XFirst=" & FirstXMax & " ZFirst=" & FirstZMax & ")"
+    End If
+    CloseTeachFile() 
+End sub
+
+Function GetAngleByTwoPoints(P1 As Double, P2 As Double) as Double
+    Diff = Abs(P1 - P2)
+    GetAngleByTwoPoints = ABToAngle(Diff, BarL)
+    If P2 > P1 Then
+      GetAngleByTwoPoints = Angle * -1
+    End If    
+End Function
+
+Function ABToAngle(leg_a As Double, leg_b As Double) As Double
+    ' Right angled triangle, a/b - cathetus, returns degree of angle a (angle between leg A and hypotenuse)
+    leg_c = SQR(leg_b * leg_b + leg_a * leg_a)
+    sin_a = leg_a / leg_c
+    ArcSin = Atn(sin_a / Sqr(-sin_a * sin_a + 1))
+    Pi = 4 * Atn(1)
+    ABToAngle = (ArcSin / Pi) * 180
+End Function
+
+Sub ProbeScallop()
+  ' Move in small increments looking for a highest spot
+  ' Consider that it's found when last ContinousDecrements didn't found any higher spot
+  ' Or when last found spot is MaxDiffTolerance larger
+  cma = 0 'continously moving away
+  While cma<ContinousDecrements and XCollMax - XCollCoord < MaxDiffTolerance
+    Code "G90"
+    Code "G1 X" & XCollCoord + ProbeXIncrement & " Z" & ZCollCoord + ProbeZIncrement & " F" & FeedR
+    ProbeRoutine
+    If XCollCoord >= XCollMax Then
+      XCollMax = XCollCoord
+      ZCollMax = ZCollCoord
+      cma = 0 ' reset cma
+    End If
+    cma = cma + 1
+    Code "(XMax=" & XCollMax & " ZMax=" & ZCollMax & " cma=" & cma & ")"
+  Wend
+End Sub
+
+Sub ProbeRoutine()
+      ' Do a single probe in steps of XProbeIncrements but not more than MaxXProbe in total
+      ' If overrun or collision discovered at the beginning consider as a failure, do a move to initial position X and then initial Z position
+      
+      Code "G91" ' Everything here is in incremental mode
+      XBeforeProbe = GetOEMDRO(178)
+      Code "F" & FeedR
+      Code "G0 F" & FeedR
+      Code "G1 F" & FeedR
+      n=1
+      maxn=Abs(MaxXProbe/XProbeIncrements) ' max steps to probe
+      Collision = 0
+      tn = 1
+      tnmax = 100
+      While GetOemLed(825)<>0 and tn < tnmax
+        Sleep(10) ' Pause to ensure piece of shit detected probe status change
+        tn = tn + 1
+      Wend
+      If GetOemLed(825)<>0 and tn >= tnmax Then
+        Code "(Probe failed. Collision at start of probe routine. Check scallop settings)"
+        MsgBox("Collision detected at start of probe routine. Considering as a failure. Going to return to starting position after you hit [OK]")
+        ResetRoutine
+        ResetMach
+      End If
+      While Collision=0 and n < maxn         
+        If GetOemLed(825)<>0 Then ' Collision detected. There must be only one place to detect OemLed 825 as it extremely flaky in the very border of electrical contact
+          XCollCoord = GetOEMDRO(800) 'Record collision coordinate X
+          ZCollCoord = GetOEMDRO(802) 'Z
+          Collision = 1
+        Else
+          n = n+1
+          ' Code "(G1X" & XProbeIncrements & " F" & FeedR & ")"
+          Code "G1X" & XProbeIncrements & " F" & FeedR 'Probe in left direction
+            While IsMoving()
+            Wend
+        End If
+      Wend
+      If Collision=0 or n >= maxn Then
+        MsgBox("Collision_state=" & Collision & " total_moves=" & n & " max_moves=" & maxn)
+        MsgBox("Probe overrun. When you hit [OK] script will jog to start position in a straight move with G90")
+        MsgBox("Going to: G0 X" & XZ & " F" & FeedR)
+        MsgBox("Going to: G0 X" & XZ & " Y" & YZ & " Z" & ZZ & " F" & FeedR )
+        ResetRoutine
+        Code "(Probe failed)"    
+        ResetMach
+      End If
+      XCollCoord = GetOEMDRO(800) 'Record collision coordinate X
+      ZCollCoord = GetOEMDRO(802) 'Z
+      ' No shit given about Y
+      ' MsgBox("Coll=" & XCollCoord & " B4" & XBeforeProbe & " Diff=" & XCollCoord - XBeforeProbe)
+End Sub
+
+Sub ResetMach()
+   ' Terminate on failure
+   DoOemButton(1021)
+   Sleep 500
+   End
+End Sub
+
+Sub ResetRoutine()
+        ' do a move to initial position X and then initial Z position
+        ' reset initial mode and rate
+        Code "G90"
+        Code "G0 X" & XZ & " F" & FeedR
+        Code "G0 X" & XZ & " Z" & ZZ & " F" & FeedR
+        Code "F" & CurrentFeed 'Returns to prior feed rate
+           If CurrentAbsInc = 0 Then 'if G91 was in effect before then return to it
+               Code "G91"
+        Else
+            Code "G90"
+        End If
+           If CurrentGMode = 0 Then 'if G0 was in effect before then return to it
+           Code "G1"
+        Else
+           Code "G0"
+        End If
+        While IsMoving() ' Do not eit before end of move
+        Wend
+End Sub
