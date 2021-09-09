@@ -57,10 +57,10 @@ Sub Main()
     ' angle in XY plane
     xy_angle = GetAngleByTwoPoints(FirstXMax, XCollMax)
     ' G68 <alpha> <beta> R<angle>
-    xy_offset = "G68 X" & XZ & "Y" & YZ & " R" & xy_angle
+    xy_offset = "G17 G68 X" & XZ & "Y" & YZ & " R" & xy_angle
     ' angle in yz plane
     yz_angle = GetAngleByTwoPoints(FirstZMax, ZCollMax)
-    yz_offset = "G68 Y" & YZ & "Z" & ZZ & " R" & yz_angle
+    yz_offset = "G19 G68 Y" & YZ & "Z" & ZZ & " R" & yz_angle
     Err = AppendTeachFile("Probes.txt")
     If Err = 0 Then
        MsgBox("Unable To Open file ")
